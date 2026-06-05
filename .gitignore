@@ -1,2 +1,3 @@
+.env
+*.json
 .Arclux
-arclux_session.json
