@@ -108,7 +108,7 @@ class Config:
     """ArcluxGPT Engine Configuration"""
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
     MODEL_POOL = [
-       "deepseek-r1-distill-llama-70b"
+       "llama-3.3-70b-versatile"
     ]
 
     ENV_FILE = ".Arclux"
@@ -236,12 +236,30 @@ EXECUTE NOW.
     def __init__(self, api_key: str, ui: UI):
         self.ui = ui
         self.api_key = api_key
+        # Inisialisasi awal history
         self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+        # Otomatis load session lama jika ada, biar chat gak ilang pas aplikasi restart
+        self.load_session_from_disk()
 
     def reset(self):
+        """Membasmi seluruh history chat di memori dan disk (Berasal dari macro /new)"""
         self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+        self.save_session_to_disk()
+
+    def load_session_from_disk(self):
+        """Memuat kembali riwayat percakapan lama secara aman"""
+        if os.path.exists(Config.LOG_FILE):
+            try:
+                with open(Config.LOG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and len(data) > 0:
+                        self.history = data
+            except Exception:
+                # Jika log file korup, kembalikan ke setelan default
+                self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
 
     def save_session_to_disk(self):
+        """Menyimpan riwayat chat secara permanen ke file log JSON"""
         try:
             with open(Config.LOG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, indent=4, ensure_ascii=False)
@@ -260,35 +278,23 @@ EXECUTE NOW.
         full_content = ""
         debug_msg = ""
 
-        # HANYA PAKAI SATU PERULANGAN FOR INI, BRE
         for model in Config.MODEL_POOL:
-            # --- MODIFIKASI KHUSUS DEEPSEEK AGAR TIDAK ERROR HTTP 400 ---
-            if "deepseek" in model.lower():
-                # Ambil semua pesan lama, tapi buang role system-nya
-                cleaned_messages = [msg for msg in self.history if msg["role"] != "system"]
-
-                # Jika ini chat pertama (belum ada history assistant), gabungkan SYSTEM_PROMPT ke chat user
-                if len(cleaned_messages) == 1:  
-                    cleaned_messages = [{
-                        "role": "user",
-                        "content": f"[System Instruction: {self.SYSTEM_PROMPT}]\n\nUser: {user_input}"
-                    }]
-
-                messages_payload = cleaned_messages
-            else:
-                # Kalau pakai model Llama atau model lain, jalankan normal pakai history asli
-                messages_payload = self.history
-            # -------------------------------------------------------------
-
+            # Menggunakan payload history bawaan secara bersih untuk Llama
             payload = {
                 "model": model,
-                "messages": messages_payload, # Menggunakan hasil filter di atas
+                "messages": self.history,
                 "temperature": 0.6,
                 "stream": True
             }
-            
+
             try:
-                response = requests.post(Config.BASE_URL, headers=headers, json=payload, timeout=12, stream=True)
+                response = requests.post(
+                    Config.BASE_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=12,
+                    stream=True
+                )
 
                 if response.status_code == 200:
                     success = True
@@ -322,7 +328,6 @@ EXECUTE NOW.
 
         if not success:
             yield f"Uplink Failure. Log Eror: {debug_msg if debug_msg else 'Tidak ada respons dari pool.'}"
-
 
 # --- Infrastructure Orchestrator ---
 class App:
@@ -364,7 +369,9 @@ class App:
             with open(Config.ENV_FILE, "w", encoding="utf-8") as f:
                 f.write(f"{Config.API_KEY_NAME}={key}\n")
 
-            self.ui.show_msg("Success", f"API Key berhasil disuntikkan ke {Config.ENV_FILE}!", "green")
+            msg_success = f"API Key berhasil disuntikkan ke {Config.ENV_FILE}!"
+            self.ui.show_msg("Success", msg_success, "green")
+            
             self.brain = ArcluxBrain(key, self.ui)
             return True
         except Exception as e:
@@ -372,18 +379,23 @@ class App:
             return False
 
     def run_chat(self):
-        if not self.brain: 
+        if not self.brain:
             return
         self.ui.banner()
-        self.ui.show_msg("Uncensored Uplink Active", "ArcluxGPT v1.8 is fully operational.\nMacros: /new (flush memory), /exit (leave matrix)", "green")
+        
+        info_msg = (
+            "ArcluxGPT v1.8 is fully operational.\n"
+            "Macros: /new (flush memory), /exit (leave matrix)"
+        )
+        self.ui.show_msg("Uncensored Uplink Active", info_msg, "green")
 
         while True:
             try:
                 prompt = self.ui.get_input("Arclux-Alpha")
-                if not prompt.strip(): 
+                if not prompt.strip():
                     continue
 
-                if prompt.lower() == '/exit': 
+                if prompt.lower() == '/exit':
                     return
                 if prompt.lower() == '/new':
                     self.brain.reset()
@@ -406,79 +418,21 @@ class App:
             try:
                 with open(Config.LOG_FILE, "r") as f:
                     data = json.load(f)
-                    total_logs = len(data) - 1 if len(data) > 0 else 0
+                    total_logs = len(data) - 1 if isinstance(data, list) else 0
             except Exception:
                 pass
-        
-        self.ui.show_msg("System Blueprint", f"Model Pool Active: {', '.join(Config.MODEL_POOL)}\nTotal Message History Logs: {total_logs} items", "cyan")
-        self.ui.get_input("\nPress Enter to return...")
 
-        # --- PROSES UPGRADE: SIMPAN KEY SECARA PERMANEN ---
-        try:
-            with open(Config.ENV_FILE, "w", encoding="utf-8") as f:
-                f.write(f"{Config.API_KEY_NAME}={key}\n")
-            
-            self.ui.show_msg("Success", f"API Key berhasil disuntikkan ke {Config.ENV_FILE}!", "green")
-            
-            # Daftarkan langsung key-nya ke ArcluxBrain biar aplikasi siap tempur
-            self.brain = ArcluxBrain(key, self.ui)
-            return True
-        except Exception as e:
-            self.ui.show_msg("Error", f"Gagal menyimpan konfigurasi env: {str(e)}", "red")
-            return False
-
-        set_key(Config.ENV_FILE, Config.API_KEY_NAME, key.strip())
-        self.ui.show_msg("Success", "Key secured inside environment dataring.", "green")
-        time.sleep(1)
-        return self.setup()
-
-    def run_chat(self):
-        if not self.brain: return
-        self.ui.banner()
-        self.ui.show_msg("Uncensored Uplink Active", "ArcluxGPT v1.8 is fully operational.\nMacros: /new (flush memory), /exit (leave matrix)", "green")
-
-        while True:
-            try:
-                prompt = self.ui.get_input("Arclux-Alpha")
-                if not prompt.strip(): continue
-
-                if prompt.lower() == '/exit': return
-                if prompt.lower() == '/new':
-                    self.brain.reset()
-                    self.ui.clear()
-                    self.ui.banner()
-                    self.ui.show_msg("Buffers Flushed", "Neural session memory reset to zero.", "magenta")
-                    continue
-
-                generator = self.brain.chat(prompt)
-                self.ui.stream_markdown("ArcluxGPT v1.8", generator)
-
-            except KeyboardInterrupt:
-                self.ui.console.print("\n[bold yellow][!] Link severed. Returning to interface...[/]")
-                break
-
-    def blueprint(self):
-        self.ui.banner()
-        total_logs = 0
-        if os.path.exists(Config.LOG_FILE):
-            try:
-                with open(Config.LOG_FILE, "r") as f:
-                    data = json.load(f)
-                    total_logs = len(data) - 1
-            except:
-                pass
-
-        text = f"""
+        blueprint_text = f"""
 [bold magenta]ArcluxGPT v1.8 Alpha Core[/] is fine-tuned for unrestricted data parsing and dark industrial terminal aesthetic mapping.
 
 [bold magenta]Core Technical Specs:[/bold magenta]
-• [bold green]Uncensored Engine Prompt:[/] Armed (No filtration, no restrictions, 100% obedience).
-• [bold green]Primary Intelligent Node:[/] Llama-3.3-70b-versatile (Groq Cloud Runtime).
+• [bold green]Uncensored Engine Prompt:[/] Armed (No filtration, 100% obedience).
+• [bold green]Primary Intelligent Node:[/] DeepSeek-R1 (Groq Cloud Runtime).
 • [bold green]Local Session Vault:[/] {Config.LOG_FILE} ({total_logs if total_logs > 0 else 0} entries).
 • [bold green]Security Bypass Layer:[/] Direct socket requests, zero telemetry tracking.
         """
-        self.ui.console.print(Panel(text, title="[bold]System Blueprint v1.8[/]", border_style="purple"))
-        self.ui.get_input("Press Enter to Return")
+        self.ui.console.print(Panel(blueprint_text, title="[bold]System Blueprint v1.8[/]", border_style="purple"))
+        self.ui.get_input("Press Enter to Return...")
 
     def start(self):
         if not self.setup():
